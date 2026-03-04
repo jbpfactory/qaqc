@@ -1,0 +1,96 @@
+"""
+BigQuery Client — เชื่อมต่อ Google BigQuery ผ่าน Service Account
+"""
+import pandas as pd
+import streamlit as st
+from google.cloud import bigquery
+from google.oauth2 import service_account
+
+PROJECT_ID = "jbp-qa-qc"
+DATASET_ID = "qc_qa_reporting"
+QA_TABLE   = f"{PROJECT_ID}.{DATASET_ID}.qa_complaints"
+QC_TABLE   = f"{PROJECT_ID}.{DATASET_ID}.qc_inspections"
+
+
+@st.cache_resource
+def get_client() -> bigquery.Client:
+    """สร้าง BigQuery client จาก secrets.toml"""
+    credentials = service_account.Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
+    return bigquery.Client(credentials=credentials, project=PROJECT_ID)
+
+
+def run_query(sql: str) -> list:
+    """รัน SQL query และคืนผลลัพธ์เป็น list of dicts"""
+    client = get_client()
+    rows = client.query(sql).result()
+    return [dict(row) for row in rows]
+
+
+def get_existing_unique_ids(unique_ids: list[str]) -> set[str]:
+    """ตรวจสอบว่า unique_id ไหนมีอยู่แล้วใน qa_complaints"""
+    if not unique_ids:
+        return set()
+    ids_str = ", ".join(f"'{uid}'" for uid in unique_ids)
+    sql = f"""
+        SELECT unique_id
+        FROM `{QA_TABLE}`
+        WHERE unique_id IN ({ids_str})
+    """
+    result = run_query(sql)
+    return {row["unique_id"] for row in result}
+
+
+def delete_qa_records(unique_ids: list[str]) -> None:
+    """ลบ QA records ที่ต้องการ override (ก่อน insert ใหม่)"""
+    if not unique_ids:
+        return
+    client = get_client()
+    ids_str = ", ".join(f"'{uid}'" for uid in unique_ids)
+    sql = f"DELETE FROM `{QA_TABLE}` WHERE unique_id IN ({ids_str})"
+    client.query(sql).result()
+
+
+def insert_rows(table: str, rows: list[dict]) -> list:
+    """Insert rows เข้า BigQuery โดยใช้ Load Job (ไม่ใช่ Streaming)
+    เพื่อหลีกเลี่ยงปัญหา streaming buffer ที่ทำให้ DELETE ไม่ได้ทันที"""
+    if not rows:
+        return []
+    client = get_client()
+    df = pd.DataFrame(rows)
+
+    # แปลง date string → datetime.date สำหรับ BQ DATE columns
+    for col in ["lot_date", "inspection_date"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+
+    # แปลง upload_timestamp string → pandas Timestamp (UTC)
+    if "upload_timestamp" in df.columns:
+        df["upload_timestamp"] = pd.to_datetime(
+            df["upload_timestamp"], errors="coerce", utc=True
+        )
+
+    table_ref = client.get_table(table)
+    job_config = bigquery.LoadJobConfig(
+        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+        schema=table_ref.schema,
+    )
+    job = client.load_table_from_dataframe(df, table, job_config=job_config)
+    job.result()
+    return []
+
+
+def get_qc_existing_unique_ids(unique_ids: list[str]) -> set[str]:
+    """ตรวจสอบ QC qc_unique_id ที่มีอยู่แล้ว (composite key: case_id+date+product+lot+qc#)"""
+    if not unique_ids:
+        return set()
+    ids_str = ", ".join(f"'{uid}'" for uid in unique_ids)
+    sql = f"""
+        SELECT qc_unique_id
+        FROM `{QC_TABLE}`
+        WHERE qc_unique_id IN ({ids_str})
+    """
+    result = run_query(sql)
+    return {row["qc_unique_id"] for row in result}
