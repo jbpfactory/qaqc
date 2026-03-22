@@ -43,7 +43,6 @@ with tab_qa:
     st.info(
         "**ไฟล์ที่รองรับ:** Form QA.xlsx (Sheet: Input Data)  \n"
         "**Unique ID:** CASE ID + DATE + STORE NAME  \n"
-        "**หากข้อมูลซ้ำ:** จะใช้ข้อมูลใหม่แทนข้อมูลเก่าอัตโนมัติ  \n"
         "**ข้อมูลสินค้า:** ดึงจากตาราง Product Ref อัตโนมัติ (ต้อง upload Ref ก่อน)"
     )
 
@@ -109,37 +108,93 @@ with tab_qa:
 
         st.divider()
 
+        # เลือกโหมดการ Upload
+        upload_mode_qa = st.radio(
+            "เลือกโหมดการ Upload:",
+            options=["upsert", "insert_only", "reset_all"],
+            format_func=lambda x: {
+                "upsert":       "🔄 Upsert — ทับข้อมูลเก่าถ้าซ้ำ (แนะนำ)",
+                "insert_only":  "➕ เพิ่มใหม่เท่านั้น — ถ้าซ้ำ จะข้ามและแสดงรายการที่ข้าม",
+                "reset_all":    "⚠️ รีเซ็ตทั้งหมด — ลบข้อมูลเดิมทั้งหมดก่อน แล้ว upload ใหม่",
+            }[x],
+            key="qa_upload_mode",
+        )
+
+        if upload_mode_qa == "reset_all":
+            st.warning("⚠️ โหมดนี้จะ **ลบข้อมูล QA ทั้งหมด** ออกก่อน แล้วใส่ข้อมูลจากไฟล์นี้แทน — ไม่สามารถกู้คืนได้")
+
         # Upload Button
         if st.button("⬆️ Upload ข้อมูล QA เข้า BigQuery", type="primary", key="qa_upload_btn"):
-            with st.spinner("กำลังตรวจสอบข้อมูลซ้ำ..."):
-                unique_ids = df_normalized["unique_id"].tolist()
-                existing_ids = bq.get_existing_unique_ids(unique_ids)
 
-            records_to_update = df_normalized[df_normalized["unique_id"].isin(existing_ids)]
-            records_to_insert = df_normalized[~df_normalized["unique_id"].isin(existing_ids)]
+            if upload_mode_qa == "reset_all":
+                with st.spinner("กำลังลบข้อมูลเดิมทั้งหมด..."):
+                    bq.clear_all_qa_data()
+                all_rows = qa_processor.df_to_bq_rows(df_normalized)
+                with st.spinner(f"กำลัง insert {len(all_rows):,} records เข้า BigQuery..."):
+                    errors = bq.insert_rows(bq.QA_TABLE, all_rows)
+                if errors:
+                    st.error(f"❌ เกิด error ระหว่าง insert: {errors[:3]}")
+                else:
+                    st.success(
+                        f"✅ Upload สำเร็จ! (โหมด: รีเซ็ตทั้งหมด)  \n"
+                        f"**เพิ่มใหม่:** {len(all_rows):,} records"
+                    )
+                    st.balloons()
 
-            update_count = len(records_to_update)
-            insert_count = len(records_to_insert)
+            elif upload_mode_qa == "upsert":
+                with st.spinner("กำลังตรวจสอบข้อมูลซ้ำ..."):
+                    unique_ids = df_normalized["unique_id"].tolist()
+                    existing_ids = bq.get_existing_unique_ids(unique_ids)
+                records_to_update = df_normalized[df_normalized["unique_id"].isin(existing_ids)]
+                records_to_insert = df_normalized[~df_normalized["unique_id"].isin(existing_ids)]
+                update_count = len(records_to_update)
+                insert_count = len(records_to_insert)
+                if update_count > 0:
+                    with st.spinner(f"กำลังอัพเดต {update_count:,} records ที่ซ้ำ..."):
+                        bq.delete_qa_records(records_to_update["unique_id"].tolist())
+                all_rows = qa_processor.df_to_bq_rows(df_normalized)
+                with st.spinner(f"กำลัง insert {len(all_rows):,} records เข้า BigQuery..."):
+                    errors = bq.insert_rows(bq.QA_TABLE, all_rows)
+                if errors:
+                    st.error(f"❌ เกิด error ระหว่าง insert: {errors[:3]}")
+                else:
+                    st.success(
+                        f"✅ Upload สำเร็จ! (โหมด: Upsert)  \n"
+                        f"**เพิ่มใหม่:** {insert_count:,} records  \n"
+                        f"**อัพเดต:** {update_count:,} records"
+                    )
+                    st.balloons()
 
-            if update_count > 0:
-                with st.spinner(f"กำลังอัพเดต {update_count:,} records ที่ซ้ำ..."):
-                    bq.delete_qa_records(records_to_update["unique_id"].tolist())
-
-            # รวม records ทั้งหมดแล้ว insert
-            all_rows = qa_processor.df_to_bq_rows(df_normalized)
-
-            with st.spinner(f"กำลัง insert {len(all_rows):,} records เข้า BigQuery..."):
-                errors = bq.insert_rows(bq.QA_TABLE, all_rows)
-
-            if errors:
-                st.error(f"❌ เกิด error ระหว่าง insert: {errors[:3]}")
-            else:
-                st.success(
-                    f"✅ Upload สำเร็จ!  \n"
-                    f"**เพิ่มใหม่:** {insert_count:,} records  \n"
-                    f"**อัพเดต:** {update_count:,} records"
-                )
-                st.balloons()
+            elif upload_mode_qa == "insert_only":
+                with st.spinner("กำลังตรวจสอบข้อมูลซ้ำ..."):
+                    unique_ids = df_normalized["unique_id"].tolist()
+                    existing_ids = bq.get_existing_unique_ids(unique_ids)
+                records_skipped = df_normalized[df_normalized["unique_id"].isin(existing_ids)]
+                records_to_insert = df_normalized[~df_normalized["unique_id"].isin(existing_ids)]
+                skip_count = len(records_skipped)
+                insert_count = len(records_to_insert)
+                if insert_count == 0:
+                    st.warning(
+                        f"⚠️ ไม่มีข้อมูลใหม่ที่ต้อง insert — "
+                        f"ทุก record ซ้ำกับข้อมูลในระบบ ({skip_count:,} records ถูกข้าม)"
+                    )
+                else:
+                    new_rows = qa_processor.df_to_bq_rows(records_to_insert)
+                    with st.spinner(f"กำลัง insert {insert_count:,} records ใหม่เข้า BigQuery..."):
+                        errors = bq.insert_rows(bq.QA_TABLE, new_rows)
+                    if errors:
+                        st.error(f"❌ เกิด error ระหว่าง insert: {errors[:3]}")
+                    else:
+                        st.success(
+                            f"✅ Upload สำเร็จ! (โหมด: เพิ่มใหม่เท่านั้น)  \n"
+                            f"**เพิ่มใหม่:** {insert_count:,} records  \n"
+                            f"**ข้ามเพราะซ้ำ:** {skip_count:,} records"
+                        )
+                        st.balloons()
+                if skip_count > 0:
+                    with st.expander(f"📋 รายการที่ถูกข้าม ({skip_count:,} records)", expanded=(insert_count == 0)):
+                        show_cols = [c for c in ["unique_id", "case_id", "complaint_date", "store_name"] if c in records_skipped.columns]
+                        st.dataframe(records_skipped[show_cols].reset_index(drop=True), width='stretch')
 
 
 # ============================================================
@@ -150,7 +205,6 @@ with tab_qc:
     st.info(
         "**ไฟล์ที่รองรับ:** Form QC.xlsx (Sheet: Input Data)  \n"
         "**ข้อมูลที่ตรวจ:** เฉพาะสินค้า Auto Tint เท่านั้น  \n"
-        "**หากข้อมูลซ้ำ:** จะใช้ข้อมูลใหม่แทนข้อมูลเก่าอัตโนมัติ  \n"
         "**ข้อมูลสินค้า:** ดึงจากตาราง Product Ref อัตโนมัติ (ต้อง upload Ref ก่อน)"
     )
 
@@ -221,39 +275,93 @@ with tab_qc:
 
         st.divider()
 
+        # เลือกโหมดการ Upload
+        upload_mode_qc = st.radio(
+            "เลือกโหมดการ Upload:",
+            options=["upsert", "insert_only", "reset_all"],
+            format_func=lambda x: {
+                "upsert":       "🔄 Upsert — ทับข้อมูลเก่าถ้าซ้ำ (แนะนำ)",
+                "insert_only":  "➕ เพิ่มใหม่เท่านั้น — ถ้าซ้ำ จะข้ามและแสดงรายการที่ข้าม",
+                "reset_all":    "⚠️ รีเซ็ตทั้งหมด — ลบข้อมูลเดิมทั้งหมดก่อน แล้ว upload ใหม่",
+            }[x],
+            key="qc_upload_mode",
+        )
+
+        if upload_mode_qc == "reset_all":
+            st.warning("⚠️ โหมดนี้จะ **ลบข้อมูล QC ทั้งหมด** ออกก่อน แล้วใส่ข้อมูลจากไฟล์นี้แทน — ไม่สามารถกู้คืนได้")
+
         # Upload Button
         if st.button("⬆️ Upload ข้อมูล QC เข้า BigQuery", type="primary", key="qc_upload_btn"):
-            # ตรวจสอบ qc_unique_id ที่มีอยู่แล้ว (composite: case_id+date+product+lot+qc#)
-            with st.spinner("กำลังตรวจสอบข้อมูลซ้ำ..."):
-                all_unique_ids = df_normalized["qc_unique_id"].tolist()
-                existing_ids = bq.get_qc_existing_unique_ids(all_unique_ids)
 
-            records_to_update = df_normalized[df_normalized["qc_unique_id"].isin(existing_ids)]
-            records_to_insert = df_normalized[~df_normalized["qc_unique_id"].isin(existing_ids)]
+            if upload_mode_qc == "reset_all":
+                with st.spinner("กำลังลบข้อมูลเดิมทั้งหมด..."):
+                    bq.clear_all_qc_data()
+                all_rows = qc_processor.df_to_bq_rows(df_normalized)
+                with st.spinner(f"กำลัง insert {len(all_rows):,} records เข้า BigQuery..."):
+                    errors = bq.insert_rows(bq.QC_TABLE, all_rows)
+                if errors:
+                    st.error(f"❌ เกิด error ระหว่าง insert: {errors[:3]}")
+                else:
+                    st.success(
+                        f"✅ Upload สำเร็จ! (โหมด: รีเซ็ตทั้งหมด)  \n"
+                        f"**เพิ่มใหม่:** {len(all_rows):,} records"
+                    )
+                    st.balloons()
 
-            update_count = len(records_to_update)
-            insert_count = len(records_to_insert)
+            elif upload_mode_qc == "upsert":
+                with st.spinner("กำลังตรวจสอบข้อมูลซ้ำ..."):
+                    all_unique_ids = df_normalized["qc_unique_id"].tolist()
+                    existing_ids = bq.get_qc_existing_unique_ids(all_unique_ids)
+                records_to_update = df_normalized[df_normalized["qc_unique_id"].isin(existing_ids)]
+                records_to_insert = df_normalized[~df_normalized["qc_unique_id"].isin(existing_ids)]
+                update_count = len(records_to_update)
+                insert_count = len(records_to_insert)
+                if update_count > 0:
+                    with st.spinner(f"กำลังอัพเดต {update_count:,} records ที่ซ้ำ..."):
+                        bq.delete_qc_records(records_to_update["qc_unique_id"].tolist())
+                all_rows = qc_processor.df_to_bq_rows(df_normalized)
+                with st.spinner(f"กำลัง insert {len(all_rows):,} records เข้า BigQuery..."):
+                    errors = bq.insert_rows(bq.QC_TABLE, all_rows)
+                if errors:
+                    st.error(f"❌ เกิด error ระหว่าง insert: {errors[:3]}")
+                else:
+                    st.success(
+                        f"✅ Upload สำเร็จ! (โหมด: Upsert)  \n"
+                        f"**เพิ่มใหม่:** {insert_count:,} records  \n"
+                        f"**อัพเดต:** {update_count:,} records"
+                    )
+                    st.balloons()
 
-            # ลบ records เก่าที่ซ้ำ (เพื่อ insert ใหม่ทับ)
-            if update_count > 0:
-                with st.spinner(f"กำลังอัพเดต {update_count:,} records ที่ซ้ำ..."):
-                    bq.delete_qc_records(records_to_update["qc_unique_id"].tolist())
-
-            # รวม records ทั้งหมดแล้ว insert
-            all_rows = qc_processor.df_to_bq_rows(df_normalized)
-
-            with st.spinner(f"กำลัง insert {len(all_rows):,} records เข้า BigQuery..."):
-                errors = bq.insert_rows(bq.QC_TABLE, all_rows)
-
-            if errors:
-                st.error(f"❌ เกิด error ระหว่าง insert: {errors[:3]}")
-            else:
-                st.success(
-                    f"✅ Upload สำเร็จ!  \n"
-                    f"**เพิ่มใหม่:** {insert_count:,} records  \n"
-                    f"**อัพเดต:** {update_count:,} records"
-                )
-                st.balloons()
+            elif upload_mode_qc == "insert_only":
+                with st.spinner("กำลังตรวจสอบข้อมูลซ้ำ..."):
+                    all_unique_ids = df_normalized["qc_unique_id"].tolist()
+                    existing_ids = bq.get_qc_existing_unique_ids(all_unique_ids)
+                records_skipped = df_normalized[df_normalized["qc_unique_id"].isin(existing_ids)]
+                records_to_insert = df_normalized[~df_normalized["qc_unique_id"].isin(existing_ids)]
+                skip_count = len(records_skipped)
+                insert_count = len(records_to_insert)
+                if insert_count == 0:
+                    st.warning(
+                        f"⚠️ ไม่มีข้อมูลใหม่ที่ต้อง insert — "
+                        f"ทุก record ซ้ำกับข้อมูลในระบบ ({skip_count:,} records ถูกข้าม)"
+                    )
+                else:
+                    new_rows = qc_processor.df_to_bq_rows(records_to_insert)
+                    with st.spinner(f"กำลัง insert {insert_count:,} records ใหม่เข้า BigQuery..."):
+                        errors = bq.insert_rows(bq.QC_TABLE, new_rows)
+                    if errors:
+                        st.error(f"❌ เกิด error ระหว่าง insert: {errors[:3]}")
+                    else:
+                        st.success(
+                            f"✅ Upload สำเร็จ! (โหมด: เพิ่มใหม่เท่านั้น)  \n"
+                            f"**เพิ่มใหม่:** {insert_count:,} records  \n"
+                            f"**ข้ามเพราะซ้ำ:** {skip_count:,} records"
+                        )
+                        st.balloons()
+                if skip_count > 0:
+                    with st.expander(f"📋 รายการที่ถูกข้าม ({skip_count:,} records)", expanded=(insert_count == 0)):
+                        show_cols = [c for c in ["qc_unique_id", "case_id", "inspection_date", "product_code", "lot", "qc_number"] if c in records_skipped.columns]
+                        st.dataframe(records_skipped[show_cols].reset_index(drop=True), width='stretch')
 
 
 # ============================================================
