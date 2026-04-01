@@ -142,16 +142,18 @@ with tab_qa:
                     st.balloons()
 
             elif upload_mode_qa == "upsert":
+                # ใช้ case_id ในการตรวจสอบ เพราะถ้าแก้ไขวันที่/ร้านค้า unique_id จะเปลี่ยน
+                # แต่ case_id ยังคงเดิม ทำให้ลบ record เก่าได้ถูกต้อง
                 with st.spinner("กำลังตรวจสอบข้อมูลซ้ำ..."):
-                    unique_ids = df_normalized["unique_id"].tolist()
-                    existing_ids = bq.get_existing_unique_ids(unique_ids)
-                records_to_update = df_normalized[df_normalized["unique_id"].isin(existing_ids)]
-                records_to_insert = df_normalized[~df_normalized["unique_id"].isin(existing_ids)]
+                    case_ids = df_normalized["case_id"].tolist()
+                    existing_case_ids = bq.get_existing_case_ids(case_ids)
+                records_to_update = df_normalized[df_normalized["case_id"].isin(existing_case_ids)]
+                records_to_insert = df_normalized[~df_normalized["case_id"].isin(existing_case_ids)]
                 update_count = len(records_to_update)
                 insert_count = len(records_to_insert)
                 if update_count > 0:
                     with st.spinner(f"กำลังอัพเดต {update_count:,} records ที่ซ้ำ..."):
-                        bq.delete_qa_records(records_to_update["unique_id"].tolist())
+                        bq.delete_qa_records_by_case_ids(records_to_update["case_id"].tolist())
                 all_rows = qa_processor.df_to_bq_rows(df_normalized)
                 with st.spinner(f"กำลัง insert {len(all_rows):,} records เข้า BigQuery..."):
                     errors = bq.insert_rows(bq.QA_TABLE, all_rows)

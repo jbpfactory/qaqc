@@ -54,6 +54,26 @@ def delete_qa_records(unique_ids: list[str]) -> None:
     client.query(sql).result()
 
 
+def delete_qa_records_by_case_ids(case_ids: list[str]) -> None:
+    """ลบ QA records โดยใช้ case_id — ใช้ตอน Upsert เพื่อรองรับกรณีที่วันที่/ร้านค้าถูกแก้ไข"""
+    if not case_ids:
+        return
+    client = get_client()
+    ids_str = ", ".join(f"'{cid}'" for cid in case_ids)
+    sql = f"DELETE FROM `{QA_TABLE}` WHERE case_id IN ({ids_str})"
+    client.query(sql).result()
+
+
+def get_existing_case_ids(case_ids: list[str]) -> set[str]:
+    """ตรวจสอบว่า case_id ไหนมีอยู่แล้วใน qa_complaints"""
+    if not case_ids:
+        return set()
+    ids_str = ", ".join(f"'{cid}'" for cid in case_ids)
+    sql = f"SELECT DISTINCT case_id FROM `{QA_TABLE}` WHERE case_id IN ({ids_str})"
+    result = run_query(sql)
+    return {row["case_id"] for row in result}
+
+
 def insert_rows(table: str, rows: list[dict]) -> list:
     """Insert rows เข้า BigQuery โดยใช้ Load Job (ไม่ใช่ Streaming)
     เพื่อหลีกเลี่ยงปัญหา streaming buffer ที่ทำให้ DELETE ไม่ได้ทันที"""
